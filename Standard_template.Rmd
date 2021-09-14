@@ -1,0 +1,152 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    toc: True
+    toc_float: True
+    df_print: paged
+---
+```{r}
+#load libraries
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(matrixStats)
+
+```
+
+
+```{r}
+#load txt files after converting cvs and deleting comments 
+
+graph_title <- "Standard Curve THRA_Isoform_2 (S5249/51)"
+path <- "~/OneDrive - Charité - Universitätsmedizin Berlin/Schuelke_Lab/qPCR/Standard_curves/2021.07.08_EG_Standard_Curve_THRA_iso2.txt"
+result_txt_name <- sub('.txt','_results.txt',path)
+
+dataset <- read.table(path, sep=",", header = T) %>%
+  as_tibble()
+
+```
+
+
+```{r}
+dataset
+```
+
+```{r}
+# Filtering out the negative controls and adding the index
+dataset <- filter(dataset,Task=="Standard") %>%
+  mutate(Sample.Name=row_number())
+  
+dataset$Ct <- as.numeric(dataset$Ct)
+dataset
+```
+```{r}
+# Creating 3 subsets of the 3 replicas (and deleted the last values)
+sub_1 <- filter(dataset, Sample.Name<9)
+sub_2 <- filter(dataset, Sample.Name<21)%>%
+  filter(Sample.Name>12)
+sub_3 <- filter(dataset, Sample.Name>24) %>%
+  filter(Sample.Name<33)
+```
+
+```{r}
+sub_1
+sub_2
+sub_3
+```
+
+```{r}
+#Creating one table
+results <- data_frame(Qty=sub_1$Qty, Ct_1=sub_1$Ct, Ct_2=sub_2$Ct, Ct_3=sub_3$Ct)
+#calculate average and std
+results <- mutate(results, Ct_mean=(Ct_1 + Ct_2 + Ct_3)/3) %>%
+   mutate(SD= rowSds(as.matrix(results[,c(2,3,4)])))
+
+results
+```
+
+```{r}
+# Calculating the linear regression
+regression_mean <- lm(Ct_mean ~ log(Qty) , data = results)
+summary(regression_mean)
+
+```
+
+
+```{r}
+# Calculate the efficiency method 1
+intercept <- as.numeric(regression_mean$coefficients[1])
+slope <- as.numeric(regression_mean$coefficients[2])
+
+# Calculate 2 predicted Ct values
+# Ct_mean = slope*(log(Qty)) + intercept
+y1=slope*log(results$Qty[1]) + intercept
+y2=slope*log(results$Qty[8]) + intercept
+dCt=y2 - y1
+dlogCN= log10(results$Qty[8]) - log10(results$Qty[1])
+
+ratio = dCt/dlogCN ## this is the slope of the linear regression
+
+efficiency = 10^(-1/ratio)
+efficiency
+
+```
+
+```{r}
+# Calculate the efficiency method 2
+new_subset <- select(results, Qty)
+results <- mutate(results, Ct_predicted=predict(regression_mean, new_subset))
+
+dCt=results$Ct_predicted[8] - results$Ct_predicted[1]
+dlogCN= log10(results$Qty[8]) - log10(results$Qty[1])
+
+
+ratio = dCt/dlogCN ## this is the slope of the linear regression
+efficiency = 10^(-1/ratio)
+efficiency
+
+```
+
+
+
+
+
+
+```{r}
+# Visualizing the data
+label_efficiency <- "Efficiency: "
+label_efficiency <- paste0(label_efficiency, as.character(format(efficiency, digit=8)))
+
+label_r<-"R-squared: "
+label_r <- paste0(label_r, as.character(format(summary(regression_mean)$r.squared), digit=8))
+
+ggplot(results, 
+       aes(x=log(Qty), y=Ct_mean)) + 
+  geom_point() +
+  geom_smooth(method = lm, formula = y ~ x)+ 
+  geom_errorbar(aes(ymin=Ct_mean-SD, ymax=Ct_mean+SD), width=.2,
+                 position=position_dodge(0.05)) +
+  ggtitle(graph_title)+
+  annotate("text", x = -2.9, y = 26, label = label_r) + 
+  annotate("text", x = -2.8, y = 24, label = label_efficiency)+
+  
+  labs(x="log(Dilutions)")
+  # theme_classic() +
+  # scale_color_manual(values=c('#999999','#E69F00'))
+
+```
+```{r}
+#save txt file of results
+write.table(results,result_txt_name,sep="\t",row.names=FALSE)
+
+```
+
+
+
+
+
+
+
+

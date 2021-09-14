@@ -1,0 +1,390 @@
+---
+title: "THRA Isoform 1 and Isoform 2 Relative Expression"
+output:
+  html_document:
+    toc: True
+    toc_float: True
+    df_print: paged
+---
+
+INTRODUCTION to the Experiment
+
+A total of 13 samples were run in triplicates on the qPCR machine. I used 4 different couples of primers:
+Exon 7 (S5247 - S5248) -> 138bp
+Isoform 1 (S5249 - S5250) -> 165bp
+Isoform 2 (S5249 - S5251) -> 184bp
+18S (S871 - S872) -> 99bp
+
+Samples were run in 2 different batches (total 52 + 8 NTCs)
+
+```{r}
+#load libraries
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(matrixStats)
+library(ggrepel)
+library(scales)
+
+```
+
+
+```{r}
+## open txt file, delete comments, substitute "_repn" with "/repn", remove cpople primers 18S
+##load txt files after converting cvs 
+
+
+path <- "~/OneDrive - Charité - Universitätsmedizin Berlin/Schuelke_Lab/qPCR/Samples/2021.07.12_EG_THRA_batch_1.txt"
+result_txt_name <- sub('.txt','_results.txt',path)
+
+dataset_1 <- read.table(path, sep=",", header = T) %>%
+  as_tibble() %>%
+  mutate(Batch=1)
+
+path_2 <- "~/OneDrive - Charité - Universitätsmedizin Berlin/Schuelke_Lab/qPCR/Samples/2021.07.12_EG_THRA_batch_2.txt"
+
+dataset_2 <- read.table(path_2, sep=",", header = T) %>%
+  as_tibble()%>%
+  mutate(Batch=2)
+
+```
+
+```{r}
+### GRAPH of THE PLATEs USED
+
+tidy_data <- separate(dataset_1, Well, into = c("row", "column"), 
+                      sep = 1, convert = TRUE)
+
+batch_1 <- ggplot(tidy_data, aes(x = column, y = row, fill = Detector, label = Sample.Name)) +
+  geom_tile(colour = "black", position ="dodge") +
+  geom_text(size=1.5) +
+  scale_y_discrete(limits = c("H", "G", "F", "E", "D", "C", "B", "A")) +
+  scale_x_continuous(breaks = 1:12) +
+    ggtitle("Batch 1")
+
+ggplotly(batch_1)
+
+tidy_data <- separate(dataset_2, Well, into = c("row", "column"), 
+                      sep = 1, convert = TRUE)
+
+batch_2 <- ggplot(tidy_data, aes(x = column, y = row, fill = Detector, label = Sample.Name)) +
+  geom_tile(colour = "black", position ="dodge") +
+  geom_text(size=1.5) +
+  scale_y_discrete(limits = c("H", "G", "F", "E", "D", "C", "B", "A")) +
+  scale_x_continuous(breaks = 1:12) +
+    ggtitle("Batch 2")
+
+ggplotly(batch_2)
+```
+
+```{r}
+## concatenate the 2 plates results
+dataset <- dataset_1 %>% 
+    bind_rows(dataset_2)
+
+dataset
+```
+
+```{r}
+## checking negative controls
+NTC <- filter(dataset,Task=="NTC") 
+NTC
+
+# Filtering out the negative controls
+dataset <- filter(dataset,Task=="Unknown") %>%
+  separate("Sample.Name", c("Sample_Name","Replica"),"/")
+  
+dataset$Ct <- as.numeric(dataset$Ct)
+dataset
+```
+```{r}
+
+##Calculate the Ct_mean of each sample
+dataset<-dataset %>%
+    group_by(Detector, Sample_Name) %>%
+    mutate(Ct_mean=mean(Ct, na.rm=TRUE))
+
+##Calculate the SD of each sample
+dataset<-dataset %>%
+    group_by(Detector, Sample_Name) %>%
+    mutate(SD=sd(Ct, na.rm=TRUE))
+
+# Get a dataframe with only the Ct_mean
+results <- select(dataset, "Sample_Name", "Detector" , "Ct_mean", "SD", as.factor("Batch")) %>%
+  distinct()   ## removes duplicates
+
+results
+
+```
+
+```{r}
+## having a look at the Ct values per sample. Ideally, Exon 7 in each sample should be the lowest value (ie, highest concentration)
+ggplot(results, aes(x = Sample_Name, y = Ct_mean, colour = Detector)) +
+         geom_point() +
+ # scale_x_discrete(guide = guide_axis(n.dodge = 3))
+   scale_x_discrete(guide = guide_axis(angle = -35))+
+   theme(axis.title.x=element_blank())
+
+ggplotly()
+
+
+```
+
+```{r}
+### Lets check if there is a systematic error between the 2 batches
+### To do this, I look at the mean value of the Ct of 18S in the two different batches. Ideally, this should be very similar
+batches_error <- results %>% 
+  filter(Detector == "18S") %>% 
+  group_by(Batch) %>% 
+  summarize(Ct_batch=mean(Ct_mean)) 
+
+
+ggplot(results, aes(x = Sample_Name, y = Ct_mean, colour = Batch)) +
+         geom_point() +
+ # scale_x_discrete(guide = guide_axis(n.dodge = 3))
+   scale_x_discrete(guide = guide_axis(angle = -35))+
+   theme(axis.title.x=element_blank())+
+   geom_hline(yintercept=batches_error$Ct_batch[1], linetype="dashed", color = "black") +
+  geom_hline(yintercept=batches_error$Ct_batch[1], linetype="dashed", color = "blue")
+```
+
+
+```{r}
+# Set the efficiencies from standard curves
+E_18S <- 1.93466722612117
+E_Exon7 <- 1.936274
+E_iso1 <- 1.959706
+E_iso2 <- 1.958637
+
+```
+
+```{r}
+### using the delta-Ct method
+### let´s first separate the data by the detectors
+
+data_18S <- results %>%
+  filter(Detector == "18S") %>%
+  mutate(Abs_18S= E_18S^Ct_mean) %>%            #### calculate the absolute value of cDNA
+  rename(Ct_18S = Ct_mean) %>%    
+  ungroup() %>%
+  select(-Detector)%>%
+  select(-SD)
+
+
+data_exon7 <- results %>%
+  filter(Detector == "THRA_Exon_7") %>%
+  mutate(Abs_Exon_7= E_Exon7^Ct_mean) %>%       #### calculate the absolute value of cDNA
+  rename(Ct_Exon_7 = Ct_mean)%>%
+  ungroup() %>%
+  select(-Detector)%>%
+  select(-SD)
+
+data_THRA_1 <- results %>%
+  filter(Detector == "THRA_1") %>%
+  mutate(Abs_THRA_1= E_iso1^Ct_mean) %>%        #### calculate the absolute value of cDNA
+  rename(Ct_THRA_1 = Ct_mean)%>%
+  ungroup() %>%
+  select(-Detector) %>%
+  select(-SD)
+
+data_THRA_2 <- results %>%
+  filter(Detector == "THRA_2") %>%
+  mutate(Abs_THRA_2= E_iso2^Ct_mean) %>%        #### calculate the absolute value of cDNA
+  rename(Ct_THRA_2 = Ct_mean)%>%
+  ungroup() %>%
+  select(-Detector)%>%
+  select(-SD)
+
+data_THRA_2
+```
+
+```{r}
+##Lets combine the data into one data frame
+
+combined_data <- left_join(data_exon7, data_THRA_1, by= "Sample_Name") %>%
+ left_join(data_THRA_2, by= "Sample_Name")
+
+combined_data
+```
+
+```{r}
+## lets calulate the delta Ct of each isoform considering exon 7 as the houskeeping gene
+### because deltaCt is a difference of exponents, this equals to the division of the Absolute values calculated
+
+combined_data <- combined_data %>%
+  mutate(ratio_iso1 = Abs_Exon_7 / Abs_THRA_1) %>%
+  mutate(ratio_iso2 = Abs_Exon_7 / Abs_THRA_2) %>%
+  mutate(ratio_Exon_7 = Abs_Exon_7 / Abs_Exon_7)
+
+combined_data
+
+#results_mean_before <- select(combined_data, Sample_Name,ratio_iso1, ratio_iso2)
+
+```
+
+
+```{r}
+### Lets graph the results
+graph_data <- combined_data %>%
+  select(Sample_Name, "THRA_1"=ratio_iso1, "THRA_2"=ratio_iso2)%>%
+  pivot_longer(!Sample_Name, names_to = "Detector", values_to = "Relative_Concentrations")
+
+
+
+ggplot(graph_data, aes(x = reorder(Sample_Name,-Relative_Concentrations), y = Relative_Concentrations, fill = Detector)) +
+  geom_col( width=0.5, position=position_dodge(width=0.7)) +
+  scale_y_continuous("Relative concentration", labels = scales::percent) +
+  scale_fill_manual("", values = c("THRA_1" = "darksalmon", "THRA_2" = "#56B4E9")) +
+  ggtitle("THRA Isoform 1 and Isoform 2 Relative Expression") +
+  theme_light(base_size = 12) +
+  scale_x_discrete(guide = guide_axis(angle = -35)) +
+  theme(axis.title.x=element_blank())
+
+#ggplotly()
+```
+```{r}
+### Lets graph the samples with higher THRA1 to THRA2 ratios and the opposite in 2 different graphs
+
+higher_THRA1 <- combined_data %>%
+  filter(ratio_iso1>ratio_iso2)%>%
+  select(Sample_Name, "THRA_1"=ratio_iso1, "THRA_2"=ratio_iso2)%>%
+  pivot_longer(!Sample_Name, names_to = "Detector", values_to = "Relative_Concentrations")
+
+ggplot(higher_THRA1, aes(x = reorder(Sample_Name,-Relative_Concentrations), y = Relative_Concentrations, fill = Detector)) +
+  geom_col( width=0.5, position=position_dodge(width=0.7)) +
+  scale_y_continuous("Relative concentration", labels = scales::percent) +
+  scale_fill_manual("", values = c("THRA_1" = "darksalmon", "THRA_2" = "#56B4E9")) +
+  ggtitle("Tissues Expressing More THRA1") +
+  theme_light(base_size = 12) +
+  scale_x_discrete(guide = guide_axis(angle = -35)) +
+  theme(axis.title.x=element_blank())
+
+
+higher_THRA2 <- combined_data %>%
+  filter(ratio_iso1<ratio_iso2)%>%
+  select(Sample_Name, "THRA_1"=ratio_iso1, "THRA_2"=ratio_iso2)%>%
+  pivot_longer(!Sample_Name, names_to = "Detector", values_to = "Relative_Concentrations")
+
+
+ggplot(higher_THRA2, aes(x = reorder(Sample_Name,-Relative_Concentrations), y = Relative_Concentrations, fill = Detector)) +
+  geom_col( width=0.5, position=position_dodge(width=0.7)) +
+  scale_y_continuous("Relative concentration", labels = scales::percent) +
+  scale_fill_manual("", values = c("THRA_1" = "darksalmon", "THRA_2" = "#56B4E9")) +
+  ggtitle("Tissues Expressing More THRA2") +
+  theme_light() +
+  scale_x_discrete(guide = guide_axis(angle = -35)) +
+  theme(axis.title.x=element_blank())
+
+
+```
+
+```{r}
+### Lets plot the difference of the percentage
+
+differential <- combined_data %>%
+  mutate(delta_qPCR=ratio_iso1-ratio_iso2)%>%
+  select(Sample_Name, delta_qPCR)
+
+write.csv(differential, file = "differential_qPCR.csv", row.names = FALSE)
+
+ggplot(differential, aes(x = reorder(Sample_Name,delta_qPCR), y = delta_qPCR)) +
+  geom_point() +
+  geom_hline(yintercept=0, linetype="dashed", color = "black")+
+  scale_x_discrete("") +
+  scale_y_continuous(limits=c(-1, 1), expand=c(0.1,0.1))+
+  ggtitle("THRA isoform expression pattern (THRA1/THRA2)") +
+  theme_light() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  geom_segment(aes(xend=Sample_Name,yend=0),linetype="dashed", color = "red")+
+   geom_text(aes(label=Sample_Name),hjust=0, vjust=1.5, angle = -35)+
+  annotate("text", x = "Thyroid", y = 0.7, label = "Higher THRA1") +
+  annotate("text", x = "Liver", y = -0.7, label = "Higher THRA2")
+
+
+
+# ggplotly()   
+
+```
+```{r}
+### Lets check that the sum of the relative concentrations is approx 1 (100%)
+
+outliers <- combined_data %>%
+  mutate(sum=ratio_iso1+ratio_iso2)%>%
+  select(Sample_Name, sum) %>%
+  mutate(outlier= sum>1.1 | sum<0.9) %>%
+  filter(outlier==TRUE) %>%
+  arrange(sum)
+
+outliers
+
+```
+
+
+
+
+
+
+```{r}
+#save txt file of results
+write.table(results,result_txt_name,sep="\t",row.names=FALSE)
+
+```
+
+
+
+```{r}
+##Lets see the general expression of THRA in the samples (normalized against 18S)
+
+combined_data_general <- left_join(data_exon7, data_18S, by= "Sample_Name") 
+
+combined_data_general
+
+## lets calulate the delta Ct of each isoform considering 18S as the housekeeping gene
+### because deltaCt is a difference of exponents, this equals to the division of the Absolute values calculated
+
+combined_data_general <- combined_data_general %>%
+  mutate(Normalized_Abs_Exon_7 = Abs_Exon_7 / Abs_18S)
+
+combined_data_general
+```
+```{r}
+### Lets graph the results
+
+ggplot(combined_data_general, aes(x = reorder(Sample_Name,-Normalized_Abs_Exon_7), y = Normalized_Abs_Exon_7)) +
+  geom_col( width=0.5, position=position_dodge(width=0.7), fill= "darksalmon") +
+  scale_y_continuous("calculated normalized copy number", labels = label_scientific()) +
+  ggtitle("THRA Expression in Human Tissues") +
+  #theme_classic(base_size = 12) +
+  theme_light() +
+  scale_x_discrete(guide = guide_axis(angle = -35), expand = c(.1, .1)) +
+  theme(axis.title.x=element_blank())
+
+#ggplotly()
+```
+```{r}
+graph_data_general <- combined_data_general %>%
+  select(Sample_Name, Abs_Exon_7, Normalized_Abs_Exon_7)%>%
+  pivot_longer(!Sample_Name, names_to = "Detector", values_to = "Copy_Number")
+
+
+ggplot(graph_data_general, aes(x = reorder(Sample_Name,-Copy_Number), y = Copy_Number, color=Detector)) +
+         geom_point() +
+   scale_y_continuous("calculated copy number", labels = label_scientific()) +
+  ggtitle("THRA Expression: comparison Normalized vs Non normalized") +
+  #theme_classic(base_size = 12) +
+  theme_light() +
+  scale_x_discrete(guide = guide_axis(angle = -35)) +
+  theme(axis.title.x=element_blank())
+
+ggplotly()
+```
+
+
+
+
+
+
